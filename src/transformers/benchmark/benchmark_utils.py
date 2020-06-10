@@ -549,10 +549,6 @@ class Benchmark(ABC):
         return self.args.n_gpu > 0
 
     @property
-    def is_tpu(self):
-        return is_torch_tpu_available() and not self.args.no_tpu
-
-    @property
     @abstractmethod
     def framework_version(self):
         pass

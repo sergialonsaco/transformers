@@ -20,67 +20,66 @@
 
 import logging
 import timeit
+import random
 
 from transformers import (
-    MODEL_MAPPING,
-    MODEL_WITH_LM_HEAD_MAPPING,
+    TF_MODEL_MAPPING,
+    TF_MODEL_WITH_LM_HEAD_MAPPING,
     PretrainedConfig,
-    is_torch_available,
-    is_torch_tpu_available,
+    is_tf_available,
 )
 
 from .benchmark_utils import Benchmark, Memory, measure_peak_memory_cpu, start_memory_tracing, stop_memory_tracing
 
 
-if is_torch_available():
-    import torch
-    from .benchmark_args import PyTorchBenchmarkArguments
+if is_tf_available():
+    import tensorflow as tf
+    from .benchmark_args_tf import TensorflowBenchmarkArguments
 
 
 logger = logging.getLogger(__name__)
 
 
-class PyTorchBenchmark(Benchmark):
+def random_input_ids(batch_size, sequence_length, vocab_size):
+    rng = random.Random()
 
-    args: PyTorchBenchmarkArguments
+    values = [rng.randint(0, vocab_size - 1) for i in range(batch_size * sequence_length)]
+
+    return tf.constant(values, shape=(batch_size, sequence_length), dtype=tf.int32)
+
+
+class TensorflowBenchmark(Benchmark):
+
+    args: TensorflowBenchmarkArguments
     configs: PretrainedConfig
-    framework: str = "PyTorch"
+    framework: str = "Tensorflow"
 
     @property
     def framework_version(self):
-        return torch.__version__
+        return tf.__version__
 
     def train(self, model_name, batch_size, sequence_length, trace_memory=False):
         try:
             config = self.config_dict[model_name]
 
-            if self.args.torchscript:
-                config.torchscript = True
-
-            model = MODEL_WITH_LM_HEAD_MAPPING[config.__class__](config)
-            model.to(self.args.device)
-            model.train()
+            model = TF_MODEL_WITH_LM_HEAD_MAPPING[config.__class__](config)
 
             # encoder-decoder has vocab size saved differently
             vocab_size = config.vocab_size if hasattr(config, "vocab_size") else config.encoder.vocab_size
-            input_ids = torch.randint(
-                vocab_size, (batch_size, sequence_length), dtype=torch.long, device=self.args.device
-            )
 
-            if self.args.torchscript:
-                raise NotImplementedError("Training for torchscript is currently not implemented")
-            else:
-                train_model = model
+            input_ids = random_input_ids(batch_size, sequence_length, vocab_size)
 
             def compute_loss_and_backprob_encoder():
-                loss = train_model(input_ids, labels=input_ids)[0]
-                loss.backward()
-                train_model.zero_grad()
+                loss = model(input_ids, labels=input_ids, training=True)[0]
+                gradients = tf.gradients(loss, model.trainable_variables)
+                gradients = None
+                return gradients
 
             def compute_loss_and_backprob_encoder_decoder():
-                loss = train_model(input_ids, decoder_input_ids=input_ids, labels=input_ids)[0]
-                loss.backward()
-                train_model.zero_grad()
+                loss = model(input_ids, decoder_input_ids=input_ids, labels=input_ids)[0]
+                gradients = tf.gradients(loss, model.trainable_variables)
+                gradients = None
+                return gradients
 
             _train = (
                 compute_loss_and_backprob_encoder_decoder
@@ -106,7 +105,7 @@ class PyTorchBenchmark(Benchmark):
 
                         # calculate loss and do backpropagation
                         _train()
-                elif not self.args.no_tpu and is_torch_tpu_available():
+                elif not self.args.no_tpu and self.
                     # tpu
                     raise NotImplementedError(
                         "Memory Benchmarking is currently not implemented for TPU. Please disable memory benchmarking with `args.no_memory=True`"
@@ -134,7 +133,7 @@ class PyTorchBenchmark(Benchmark):
 
                 return memory, summary
             else:
-                if (not self.args.no_tpu and is_torch_tpu_available()) or self.args.torchscript:
+                if (not self.args.no_tpu and is_torch_tpu_available()):
                     # run additional 10 times to stabilize compilation for tpu and torchscript
                     logger.info("Do inference on TPU or torchscript. Running model 5 times to stabilize compilation")
                     timeit.repeat(
@@ -143,11 +142,6 @@ class PyTorchBenchmark(Benchmark):
 
                 # as written in https://docs.python.org/2/library/timeit.html#timeit.Timer.repeat, min should be taken rather than the average
                 runtimes = timeit.repeat(_train, repeat=self.args.repeat, number=10,)
-
-                if not self.args.no_tpu and is_torch_tpu_available() and self.args.torch_xla_tpu_print_metrics:
-                    import torch_xla.debug.metrics as met
-
-                    self.print_fn(met.metrics_report())
 
                 return min(runtimes) / 10.0
         except RuntimeError as e:

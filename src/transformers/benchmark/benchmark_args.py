@@ -34,11 +34,8 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class PyTorchBenchmarkArguments(BenchmarkArguments):
-    no_cuda: bool = field(default=False, metadata={"help": "Whether to run on available cuda devices"})
     torchscript: bool = field(default=False, metadata={"help": "Trace the models using torchscript"})
-    no_tpu: bool = field(default=False, metadata={"help": "Whether to run on available tpu devices"})
-    fp16: bool = field(default=False, metadata={"help": "Use FP16 to accelerate inference."})
-    tpu_print_metrics: bool = field(default=False, metadata={"help": "Use FP16 to accelerate inference."})
+    torch_xla_tpu_print_metrics: bool = field(default=False, metadata={"help": "Print Xla/PyTorch tpu metrics"})
 
     @cached_property
     @torch_required
@@ -54,6 +51,10 @@ class PyTorchBenchmarkArguments(BenchmarkArguments):
             device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
             n_gpu = torch.cuda.device_count()
         return device, n_gpu
+
+    @property
+    def is_tpu(self):
+        return is_torch_tpu_available() and not self.args.no_tpu
 
     @property
     @torch_required
