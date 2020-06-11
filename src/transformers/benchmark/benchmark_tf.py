@@ -22,17 +22,33 @@ import logging
 import random
 import timeit
 
-from transformers import TF_MODEL_MAPPING, TF_MODEL_WITH_LM_HEAD_MAPPING, PretrainedConfig, is_tf_available
+from transformers import (
+    TF_MODEL_MAPPING,
+    TF_MODEL_WITH_LM_HEAD_MAPPING,
+    PretrainedConfig,
+    is_py3nvml_available,
+    is_tf_available,
+)
 
-from .benchmark_utils import Benchmark, Memory, measure_peak_memory_cpu, start_memory_tracing, stop_memory_tracing
+from .benchmark_utils import (
+    Benchmark,
+    Memory,
+    get_cpu_memory,
+    get_gpu_memory,
+    measure_peak_memory_cpu,
+    start_memory_tracing,
+    stop_memory_tracing,
+)
 
 
 if is_tf_available():
     import tensorflow as tf
     from tensorflow.python.eager import context as tf_context
-    from tensorflow.contrib.memory_stats.python.ops.memory_stats_ops import MaxBytesInUse
     from .benchmark_args_tf import TensorflowBenchmarkArguments
 
+
+if is_py3nvml_available():
+    import py3nvml.py3nvml as nvml
 
 logger = logging.getLogger(__name__)
 
@@ -102,7 +118,7 @@ class TensorflowBenchmark(Benchmark):
                     )
                 else:
                     # cpu
-                    memory_bytes = measure_peak_memory_cpu(_train)
+                    memory_bytes = measure_peak_memory_cpu(_train, get_cpu_memory)
                     memory = Memory(memory_bytes) if isinstance(memory_bytes, int) else memory_bytes
 
                 if self.args.trace_memory_line_by_line:
@@ -112,10 +128,20 @@ class TensorflowBenchmark(Benchmark):
 
                 if self.args.n_gpu > 0:
                     # gpu
-                    with tf.device(self.args.device):
-                        max_bytes_in_use = MaxBytesInUse()
+                    if not is_py3nvml_available():
+                        logger.warning(
+                            "py3nvml not installed, we won't log GPU memory usage. "
+                            "Install py3nvml (pip install py3nvml) to log information about GPU."
+                        )
+                        memory = "N/A"
+                    else:
+                        nvml.nvmlInit()
+                        max_bytes_in_use = measure_peak_memory_cpu(
+                            _train, get_gpu_memory, device_idx=self.arsg.device_idx
+                        )
+                        nvml.nvmlShutdown()
 
-                    memory = Memory(max_bytes_in_use)
+                        memory = Memory(max_bytes_in_use)
 
                 return memory, summary
             else:
@@ -180,7 +206,7 @@ class TensorflowBenchmark(Benchmark):
                     )
                 else:
                     # cpu
-                    memory_bytes = measure_peak_memory_cpu(_forward)
+                    memory_bytes = measure_peak_memory_cpu(_forward, get_cpu_memory)
                     memory = Memory(memory_bytes) if isinstance(memory_bytes, int) else memory_bytes
 
                 if self.args.trace_memory_line_by_line:
@@ -190,10 +216,20 @@ class TensorflowBenchmark(Benchmark):
 
                 if self.args.n_gpu > 0:
                     # gpu
-                    with tf.device(self.args.device):
-                        max_bytes_in_use = MaxBytesInUse()
+                    if not is_py3nvml_available():
+                        logger.warning(
+                            "py3nvml not installed, we won't log GPU memory usage. "
+                            "Install py3nvml (pip install py3nvml) to log information about GPU."
+                        )
+                        memory = "N/A"
+                    else:
+                        nvml.nvmlInit()
+                        max_bytes_in_use = measure_peak_memory_cpu(
+                            _forward, get_gpu_memory, device_idx=self.arsg.device_idx
+                        )
+                        nvml.nvmlShutdown()
 
-                    memory = Memory(max_bytes_in_use)
+                        memory = Memory(max_bytes_in_use)
 
                 return memory, summary
             else:

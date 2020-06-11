@@ -43,7 +43,7 @@ class TensorflowBenchmarkArguments(BenchmarkArguments):
     def _setup_strategy(self) -> Tuple["tf.distribute.Strategy", int]:
         logger.info("Tensorflow: setting up strategy")
 
-        if not self.no_tpu and self.tpu:
+        if self.is_tpu:
             tf.config.experimental_connect_to_cluster(self.tpu)
             tf.tpu.experimental.initialize_tpu_system(self.tpu)
 
@@ -69,7 +69,7 @@ class TensorflowBenchmarkArguments(BenchmarkArguments):
     @property
     @tf_required
     def is_tpu(self):
-        return self.tpu is not None
+        return self.tpu is not None and not self.args.no_tpu
 
     @property
     @tf_required
@@ -80,6 +80,10 @@ class TensorflowBenchmarkArguments(BenchmarkArguments):
     @tf_required
     def n_gpu(self) -> int:
         return self._setup_strategy.num_replicas_in_sync
+
+    @property
+    def is_gpu(self):
+        return self.n_gpu > 0
 
     @property
     @tf_required

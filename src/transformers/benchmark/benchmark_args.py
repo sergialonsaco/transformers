@@ -70,3 +70,7 @@ class PyTorchBenchmarkArguments(BenchmarkArguments):
     @torch_required
     def n_gpu(self):
         return self._setup_devices[1]
+
+    @property
+    def is_gpu(self):
+        return self.n_gpu > 0
