@@ -40,58 +40,49 @@ class TensorflowBenchmarkArguments(BenchmarkArguments):
 
     @cached_property
     @tf_required
-    def _setup_strategy(self) -> Tuple["tf.distribute.Strategy", int]:
+    def _setup_strategy(self) -> Tuple["tf.distribute.Strategy", "tf.distribute.cluster_resolver.TPUClusterResolver"]:
         logger.info("Tensorflow: setting up strategy")
 
-        if self.is_tpu:
-            tf.config.experimental_connect_to_cluster(self.tpu)
-            tf.tpu.experimental.initialize_tpu_system(self.tpu)
+        if not self.no_tpu:
+            try:
+                if self.tpu_name:
+                    tpu = tf.distribute.cluster_resolver.TPUClusterResolver(self.tpu_name)
+                else:
+                    tpu = tf.distribute.cluster_resolver.TPUClusterResolver()
+            except ValueError:
+                tpu = None
+        else:
+            tpu = None
 
-            strategy = tf.distribute.experimental.TPUStrategy(self.tpu)
+        if tpu is not None:
+            tf.config.experimental_connect_to_cluster(tpu)
+            tf.tpu.experimental.initialize_tpu_system(tpu)
+
+            strategy = tf.distribute.experimental.TPUStrategy(tpu)
         else:
             # currently no multi gpu is allowed
-            strategy = tf.distribute.OneDeviceStrategy(device=self.device)
+            device = f"/gpu:{self.device_idx}" if self.is_gpu else f"/cpu:{self.device_idx}"
+            strategy = tf.distribute.OneDeviceStrategy(device=device)
 
-        return strategy
-
-    @property
-    @tf_required
-    def tpu(self):
-        try:
-            if self.tpu_name:
-                tpu = tf.distribute.cluster_resolver.TPUClusterResolver(self.tpu_name)
-            else:
-                tpu = tf.distribute.cluster_resolver.TPUClusterResolver()
-            return tpu
-        except ValueError:
-            return None
+        return strategy, tpu
 
     @property
     @tf_required
-    def is_tpu(self):
-        return self.tpu is not None and not self.args.no_tpu
+    def is_tpu(self) -> bool:
+        tpu = self._setup_strategy[1]
+        return tpu is not None and not self.args.no_tpu
 
     @property
     @tf_required
     def strategy(self) -> "tf.distribute.Strategy":
-        return self._setup_strategy
+        return self._setup_strategy[0]
 
     @property
     @tf_required
     def n_gpu(self) -> int:
-        return self._setup_strategy.num_replicas_in_sync
-
-    @property
-    def is_gpu(self):
-        return self.n_gpu > 0
-
-    @property
-    @tf_required
-    def device(self) -> str:
         gpus = tf.config.list_physical_devices("GPU")
-        if self.is_tpu:
-            return self.tpu
-        if not self.no_cuda and len(gpus) > 0:
-            return "/gpu:{self.device_idx}"  # currently only single device is supported
-        else:
-            return "/cpu:{self.device_idx}"
+        return len(gpus)
+
+    @property
+    def is_gpu(self) -> bool:
+        return self.n_gpu > 0 and not self.no_cuda

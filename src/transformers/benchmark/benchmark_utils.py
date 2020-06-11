@@ -166,7 +166,7 @@ def get_gpu_memory(process_id: int, device_idx: int) -> int:
                 process_id for which to measure memory
 
             - `device_idx`: (`int`)
-                device_id for which to measure gpu usage
+                device id for which to measure gpu usage
 
         Returns
             - `memory`: (`int`)
@@ -198,13 +198,13 @@ def measure_peak_memory_cpu(
                 function without any arguments to measure for which to measure the peak memory
 
             - `get_memory_fn: (`callable`): function(int, Optional[int]) -> int
-                function that takes a process_id and torch_device and returns the current memory usage
+                function that takes a process_id and device_idx and returns the current memory usage
 
             - `interval`: (`float`, `optional`, defaults to `0.5`)
                 interval in second for which to measure the memory usage
 
             - `device_idx`: (`int`, `optional`, defaults to `None`)
-                device_id for which to measure gpu usage
+                device id for which to measure gpu usage
 
         Returns:
             - `max_memory`: (`int`)
