@@ -37,11 +37,15 @@ class TensorflowBenchmarkArguments(BenchmarkArguments):
     device_idx: int = field(
         default=0, metadata={"help": "CPU / GPU device index. Defaults to 0."},
     )
+    tf_log_level: str = field(
+        default="ERROR", metadata={"help": "Log level for tensorflow logger. Defaults to 'ERROR'"}
+    )
 
     @cached_property
     @tf_required
     def _setup_strategy(self) -> Tuple["tf.distribute.Strategy", "tf.distribute.cluster_resolver.TPUClusterResolver"]:
         logger.info("Tensorflow: setting up strategy")
+        tf.get_logger().setLevel(self.tf_log_level)
 
         if not self.no_tpu:
             try:
@@ -61,8 +65,17 @@ class TensorflowBenchmarkArguments(BenchmarkArguments):
             strategy = tf.distribute.experimental.TPUStrategy(tpu)
         else:
             # currently no multi gpu is allowed
-            device = f"/gpu:{self.device_idx}" if self.is_gpu else f"/cpu:{self.device_idx}"
-            strategy = tf.distribute.OneDeviceStrategy(device=device)
+            gpus = tf.config.list_physical_devices("GPU")
+            if self.is_gpu:
+                try:
+                    tf.config.experimental.set_visible_devices(gpus[self.device_idx], "GPU")
+                    tf.config.experimental.set_memory_growth(gpus[self.device_idx], True)
+                except:  # noqa: E722
+                    logger.warn(f"Cannot enable gpu growth for GPU {self.device_idx}.")
+                strategy = tf.distribute.OneDeviceStrategy(device=f"/gpu:{self.device_idx}")
+            else:
+                tf.config.experimental.set_visible_devices([], "GPU")  # disable GPU
+                strategy = tf.distribute.OneDeviceStrategy(device=f"/cpu:{self.device_idx}")
 
         return strategy, tpu
 
@@ -80,9 +93,11 @@ class TensorflowBenchmarkArguments(BenchmarkArguments):
     @property
     @tf_required
     def n_gpu(self) -> int:
-        gpus = tf.config.list_physical_devices("GPU")
-        return len(gpus)
+        if not self.no_cuda:
+            gpus = tf.config.list_physical_devices("GPU")
+            return len(gpus)
+        return 0
 
     @property
     def is_gpu(self) -> bool:
-        return self.n_gpu > 0 and not self.no_cuda
+        return self.n_gpu > 0

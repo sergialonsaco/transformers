@@ -30,25 +30,13 @@ from transformers import (
     is_tf_available,
 )
 
-from .benchmark_utils import (
-    Benchmark,
-    Memory,
-    get_cpu_memory,
-    get_gpu_memory,
-    measure_peak_memory_cpu,
-    start_memory_tracing,
-    stop_memory_tracing,
-)
+from .benchmark_utils import Benchmark, Memory, measure_peak_memory_cpu, start_memory_tracing, stop_memory_tracing
 
 
 if is_tf_available():
     import tensorflow as tf
-    from tensorflow.python.eager import context as tf_context
     from .benchmark_args_tf import TensorflowBenchmarkArguments
 
-
-if is_py3nvml_available():
-    import py3nvml.py3nvml as nvml
 
 logger = logging.getLogger(__name__)
 
@@ -67,11 +55,40 @@ class TensorflowBenchmark(Benchmark):
     configs: PretrainedConfig
     framework: str = "Tensorflow"
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        # hack for now to prevent wrong GPU measurements
+        if not self.args.no_memory:
+            if not sorted(self.args.batch_sizes) == self.args.batch_sizes:
+                raise ValueError(
+                    f"The measured memory usage will not be correct if `args.batch_sizes` are not sorted in"
+                    f" ascending order. Please run the benchmark with `args.batch_sizes={sorted(self.args.batch_sizes)}`."
+                )
+
+            if not sorted(self.args.sequence_lengths) == self.args.sequence_lengths:
+                raise ValueError(
+                    "The measured memory usage will not be correct if `args.sequence_lengths` are not sorted in"
+                    f" ascending order. Please run the benchmark with `args.sequence_lengths={sorted(self.args.sequence_lengths)}`."
+                )
+
     @property
     def framework_version(self):
         return tf.__version__
 
     def train(self, model_name, batch_size, sequence_length, trace_memory=False):
+        # clear gpu cache before going into scope
+        raise NotImplementedError("Currently not implemented")
+        if self.args.is_gpu:
+            tf.keras.backend.clear_session()
+
+        # TODO (PVP): There does not seem to be a way to clear the
+        # GPU cache within the same process:
+        # https://github.com/tensorflow/tensorflow/issues/36627
+        # https://github.com/tensorflow/tensorflow/issues/19731
+        # https://github.com/tensorflow/tensorflow/issues/37289
+        # tf_context.context()._clear_caches()  # See https://github.com/tensorflow/tensorflow/issues/20218#issuecomment-416771802
+
         with self.args.strategy.scope():
             try:
                 config = self.config_dict[model_name]
@@ -84,7 +101,7 @@ class TensorflowBenchmark(Benchmark):
                 input_ids = random_input_ids(batch_size, sequence_length, vocab_size)
 
                 def compute_loss_and_backprob_encoder():
-                    loss = model(input_ids, labels=input_ids, training=True)[0]
+                    loss = model(input_ids, labels=input_ids, training=False)[0]
                     gradients = tf.gradients(loss, model.trainable_variables)
                     gradients = None
                     return gradients
@@ -105,17 +122,14 @@ class TensorflowBenchmark(Benchmark):
                     if self.args.trace_memory_line_by_line:
                         trace = start_memory_tracing("transformers")
 
-                    if self.args.n_gpu > 0:
-                        # clear gpu cache
-                        tf_context.context()._clear_caches()  # See https://github.com/tensorflow/tensorflow/issues/20218#issuecomment-416771802
-                    elif not self.args.no_tpu and self.args.is_tpu:
+                    if not self.args.no_tpu and self.args.is_tpu:
                         # tpu
                         raise NotImplementedError(
                             "Memory Benchmarking is currently not implemented for TPU. Please disable memory benchmarking with `args.no_memory=True`"
                         )
                     else:
                         # cpu
-                        memory_bytes = measure_peak_memory_cpu(_train, get_cpu_memory)
+                        memory_bytes = measure_peak_memory_cpu(_train, "cpu")
                         memory = Memory(memory_bytes) if isinstance(memory_bytes, int) else memory_bytes
 
                     if self.args.trace_memory_line_by_line:
@@ -132,11 +146,7 @@ class TensorflowBenchmark(Benchmark):
                             )
                             memory = "N/A"
                         else:
-                            nvml.nvmlInit()
-                            max_bytes_in_use = measure_peak_memory_cpu(
-                                _train, get_gpu_memory, device_idx=self.args.device_idx
-                            )
-                            nvml.nvmlShutdown()
+                            max_bytes_in_use = measure_peak_memory_cpu(_train, "gpu", device_idx=self.args.device_idx)
 
                             memory = Memory(max_bytes_in_use)
 
@@ -161,8 +171,16 @@ class TensorflowBenchmark(Benchmark):
                     return "N/A"
 
     def inference(self, model_name, batch_size, sequence_length, trace_memory=False):
-        import ipdb
-        ipdb.set_trace()
+        # clear gpu cache before going into scope
+        if self.args.is_gpu:
+            tf.keras.backend.clear_session()
+        # TODO (PVP): There does not seem to be a way to clear the
+        # GPU cache within the same process:
+        # https://github.com/tensorflow/tensorflow/issues/36627
+        # https://github.com/tensorflow/tensorflow/issues/19731
+        # https://github.com/tensorflow/tensorflow/issues/37289
+        # tf_context.context()._clear_caches()  # See https://github.com/tensorflow/tensorflow/issues/20218#issuecomment-416771802
+
         with self.args.strategy.scope():
             try:
                 config = self.config_dict[model_name]
@@ -179,10 +197,10 @@ class TensorflowBenchmark(Benchmark):
                 input_ids = random_input_ids(batch_size, sequence_length, vocab_size)
 
                 def encoder_decoder_forward():
-                    model(input_ids, decoder_input_ids=input_ids)
+                    model(input_ids, decoder_input_ids=input_ids, training=False)
 
                 def encoder_forward():
-                    model(input_ids)
+                    model(input_ids, training=False)
 
                 _forward = encoder_decoder_forward if config.is_encoder_decoder else encoder_forward
 
@@ -190,17 +208,14 @@ class TensorflowBenchmark(Benchmark):
                     if self.args.trace_memory_line_by_line:
                         trace = start_memory_tracing("transformers")
 
-                    if self.args.n_gpu > 0:
-                        # clear gpu cache
-                        tf_context.context()._clear_caches()  # See https://github.com/tensorflow/tensorflow/issues/20218#issuecomment-416771802
-                    elif not self.args.no_tpu and self.args.is_tpu:
+                    if not self.args.no_tpu and self.args.is_tpu:
                         # tpu
                         raise NotImplementedError(
                             "Memory Benchmarking is currently not implemented for TPU. Please disable memory benchmarking with `args.no_memory=True`"
                         )
                     else:
                         # cpu
-                        memory_bytes = measure_peak_memory_cpu(_forward, get_cpu_memory)
+                        memory_bytes = measure_peak_memory_cpu(_forward, "cpu")
                         memory = Memory(memory_bytes) if isinstance(memory_bytes, int) else memory_bytes
 
                     if self.args.trace_memory_line_by_line:
@@ -217,11 +232,9 @@ class TensorflowBenchmark(Benchmark):
                             )
                             memory = "N/A"
                         else:
-                            nvml.nvmlInit()
                             max_bytes_in_use = measure_peak_memory_cpu(
-                                _forward, get_gpu_memory, device_idx=self.args.device_idx
+                                _forward, "gpu", device_idx=self.args.device_idx, interval=0.1
                             )
-                            nvml.nvmlShutdown()
 
                             memory = Memory(max_bytes_in_use)
 

@@ -23,14 +23,7 @@ import timeit
 
 from transformers import MODEL_MAPPING, MODEL_WITH_LM_HEAD_MAPPING, PretrainedConfig, is_torch_available
 
-from .benchmark_utils import (
-    Benchmark,
-    Memory,
-    get_cpu_memory,
-    measure_peak_memory_cpu,
-    start_memory_tracing,
-    stop_memory_tracing,
-)
+from .benchmark_utils import Benchmark, Memory, measure_peak_memory_cpu, start_memory_tracing, stop_memory_tracing
 
 
 if is_torch_available():
@@ -114,7 +107,7 @@ class PyTorchBenchmark(Benchmark):
                     )
                 else:
                     # cpu
-                    memory_bytes = measure_peak_memory_cpu(_train, get_cpu_memory)
+                    memory_bytes = measure_peak_memory_cpu(_train, "cpu")
                     memory = Memory(memory_bytes) if isinstance(memory_bytes, int) else memory_bytes
 
                 if self.args.trace_memory_line_by_line:
@@ -224,7 +217,7 @@ class PyTorchBenchmark(Benchmark):
                     )
                 else:
                     # cpu
-                    memory_bytes = measure_peak_memory_cpu(_forward, get_cpu_memory)
+                    memory_bytes = measure_peak_memory_cpu(_forward, "cpu")
                     memory = Memory(memory_bytes) if isinstance(memory_bytes, int) else memory_bytes
 
                 if self.args.trace_memory_line_by_line:

@@ -136,54 +136,8 @@ class MemorySummary(NamedTuple):
 MemoryTrace = List[UsedMemoryState]
 
 
-def get_cpu_memory(process_id: int, *args) -> int:
-    """
-        measures current cpu memory usage of a given `process_id`
-
-        Args:
-            - `process_id`: (`int`)
-                process_id for which to measure memory
-
-        Returns
-            - `memory`: (`int`)
-                cosumed memory in Bytes
-    """
-    process = psutil.Process(process_id)
-    try:
-        meminfo_attr = "memory_info" if hasattr(process, "memory_info") else "get_memory_info"
-        memory = getattr(process, meminfo_attr)()[0]
-    except psutil.AccessDenied:
-        raise ValueError("Error with Psutil.")
-    return memory
-
-
-def get_gpu_memory(process_id: int, device_idx: int) -> int:
-    """
-        measures current gpu memory usage of a given `process_id`
-
-        Args:
-            - `process_id`: (`int`)
-                process_id for which to measure memory
-
-            - `device_idx`: (`int`)
-                device id for which to measure gpu usage
-
-        Returns
-            - `memory`: (`int`)
-                cosumed memory in Bytes
-    """
-    try:
-        handle = nvml.nvmlDeviceGetHandleByIndex(device_idx)
-        processes = nvml.nvmlDeviceGetComputeRunningProcesses(handle)
-        current_process = filter(lambda x: x.pid == process_id, processes)[0]
-        memory_usage = current_process.usedGpuMemory
-    except nvml.NVMLError_GpuIsLost:
-        raise ValueError("Error with p3nvml.")
-    return memory_usage
-
-
 def measure_peak_memory_cpu(
-    function: Callable[[], None], get_memory_fn: Callable[[int, int], int], interval=0.5, device_idx=None
+    function: Callable[[], None], processessing_unit_type: str, interval=0.5, device_idx=None
 ) -> int:
 
     """
@@ -197,8 +151,8 @@ def measure_peak_memory_cpu(
             - `function`: (`callable`): function() -> ...
                 function without any arguments to measure for which to measure the peak memory
 
-            - `get_memory_fn: (`callable`): function(int, Optional[int]) -> int
-                function that takes a process_id and device_idx and returns the current memory usage
+            - `processessing_unit_type: (`str`):
+                type of Processing Unit to measure. Either "cpu" or "gpu"
 
             - `interval`: (`float`, `optional`, defaults to `0.5`)
                 interval in second for which to measure the memory usage
@@ -210,6 +164,58 @@ def measure_peak_memory_cpu(
             - `max_memory`: (`int`)
                 cosumed memory peak in Bytes
     """
+
+    def get_gpu_memory(process_id: int, device_idx: int) -> int:
+        """
+            measures current gpu memory usage of a given `process_id`
+
+            Args:
+                - `process_id`: (`int`)
+                    process_id for which to measure memory
+
+                - `device_idx`: (`int`)
+                    device id for which to measure gpu usage
+
+            Returns
+                - `memory`: (`int`)
+                    cosumed memory in Bytes
+        """
+        try:
+            nvml.nvmlInit()
+            handle = nvml.nvmlDeviceGetHandleByIndex(device_idx)
+            processes = nvml.nvmlDeviceGetComputeRunningProcesses(handle)
+            current_process = next(filter(lambda x: x.pid == process_id, processes))
+            memory = current_process.usedGpuMemory
+            nvml.nvmlShutdown()
+        except nvml.NVMLError_GpuIsLost:
+            raise ValueError("Error with p3nvml.")
+        except (RuntimeError):
+            import ipdb
+
+            ipdb.set_trace()
+            raise RuntimeError
+        return memory
+
+    def get_cpu_memory(process_id: int) -> int:
+        """
+            measures current cpu memory usage of a given `process_id`
+
+            Args:
+                - `process_id`: (`int`)
+                    process_id for which to measure memory
+
+            Returns
+                - `memory`: (`int`)
+                    cosumed memory in Bytes
+        """
+        process = psutil.Process(process_id)
+        try:
+            meminfo_attr = "memory_info" if hasattr(process, "memory_info") else "get_memory_info"
+            memory = getattr(process, meminfo_attr)()[0]
+        except psutil.AccessDenied:
+            raise ValueError("Error with Psutil.")
+        return memory
+
     if not is_psutil_available():
         logger.warning(
             "Psutil not installed, we won't log CPU memory usage. "
@@ -231,13 +237,25 @@ def measure_peak_memory_cpu(
                 self.interval = interval
                 self.connection = child_connection
                 self.num_measurements = 1
-                self.mem_usage = get_memory_fn(process_id)
+                if processessing_unit_type == "cpu":
+                    self.mem_usage = get_cpu_memory(self.process_id)
+                elif processessing_unit_type == "gpu":
+                    self.mem_usage = get_gpu_memory(self.process_id, device_idx)
+                else:
+                    raise NotImplementedError(f"{processessing_unit_type} does not exist.")
 
             def run(self):
                 self.connection.send(0)
                 stop = False
                 while True:
-                    self.mem_usage = max(self.mem_usage, get_memory_fn(self.process_id))
+                    if processessing_unit_type == "cpu":
+                        mem_usage = get_cpu_memory(self.process_id)
+                    elif processessing_unit_type == "gpu":
+                        mem_usage = get_gpu_memory(self.process_id, device_idx)
+                    else:
+                        raise NotImplementedError(f"{processessing_unit_type} does not exist.")
+
+                    self.mem_usage = max(self.mem_usage, mem_usage)
                     self.num_measurements += 1
 
                     if stop:
