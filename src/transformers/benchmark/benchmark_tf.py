@@ -19,21 +19,18 @@
 
 
 import logging
-import timeit
 import random
+import timeit
 
-from transformers import (
-    TF_MODEL_MAPPING,
-    TF_MODEL_WITH_LM_HEAD_MAPPING,
-    PretrainedConfig,
-    is_tf_available,
-)
+from transformers import TF_MODEL_MAPPING, TF_MODEL_WITH_LM_HEAD_MAPPING, PretrainedConfig, is_tf_available
 
 from .benchmark_utils import Benchmark, Memory, measure_peak_memory_cpu, start_memory_tracing, stop_memory_tracing
 
 
 if is_tf_available():
     import tensorflow as tf
+    from tensorflow.python.eager import context as tf_context
+    from tensorflow.contrib.memory_stats.python.ops.memory_stats_ops import MaxBytesInUse
     from .benchmark_args_tf import TensorflowBenchmarkArguments
 
 
@@ -94,18 +91,11 @@ class TensorflowBenchmark(Benchmark):
                 if self.args.n_gpu > 0:
                     # gpu
                     # clear gpu cache
-                    torch.cuda.empty_cache()
-                    if hasattr(torch.cuda, "max_memory_reserved"):
-                        torch.cuda.reset_peak_memory_stats()
-                    else:
-                        logger.info(
-                            "Please consider updating PyTorch to version 1.4 to get more accuracy on GPU memory usage"
-                        )
-                        torch.cuda.reset_max_memory_cached()
+                    tf_context.context()._clear_caches()  # See https://github.com/tensorflow/tensorflow/issues/20218#issuecomment-416771802
 
-                        # calculate loss and do backpropagation
-                        _train()
-                elif not self.args.no_tpu and self.
+                    # calculate loss and do backpropagation
+                    _train()
+                elif not self.args.no_tpu and self.args.is_tpu:
                     # tpu
                     raise NotImplementedError(
                         "Memory Benchmarking is currently not implemented for TPU. Please disable memory benchmarking with `args.no_memory=True`"
@@ -122,18 +112,14 @@ class TensorflowBenchmark(Benchmark):
 
                 if self.args.n_gpu > 0:
                     # gpu
-                    if hasattr(torch.cuda, "max_memory_reserved"):
-                        memory = Memory(torch.cuda.max_memory_reserved())
-                    else:
-                        logger.info(
-                            "Please consider updating PyTorch to version 1.4 to get more accuracy on GPU memory usage"
-                        )
-                        memory = Memory(torch.cuda.max_memory_cached())
-                    memory = Memory(torch.cuda.max_memory_reserved())
+                    with tf.device(self.args.device):
+                        max_bytes_in_use = MaxBytesInUse()
+
+                    memory = Memory(max_bytes_in_use)
 
                 return memory, summary
             else:
-                if (not self.args.no_tpu and is_torch_tpu_available()):
+                if not self.args.no_tpu and self.args.is_tpu:
                     # run additional 10 times to stabilize compilation for tpu and torchscript
                     logger.info("Do inference on TPU or torchscript. Running model 5 times to stabilize compilation")
                     timeit.repeat(
@@ -160,36 +146,20 @@ class TensorflowBenchmark(Benchmark):
                 config.torchscript = True
 
             if self.args.with_lm_head:
-                model = MODEL_WITH_LM_HEAD_MAPPING[config.__class__](config)
+                model = TF_MODEL_WITH_LM_HEAD_MAPPING[config.__class__](config)
             else:
-                model = MODEL_MAPPING[config.__class__](config)
-
-            model.eval()
-            model.to(self.args.device)
+                model = TF_MODEL_MAPPING[config.__class__](config)
 
             # encoder-decoder has vocab size saved differently
             vocab_size = config.vocab_size if hasattr(config, "vocab_size") else config.encoder.vocab_size
 
-            input_ids = torch.randint(
-                vocab_size, (batch_size, sequence_length), dtype=torch.long, device=self.args.device
-            )
-
-            if self.args.torchscript:
-                with torch.no_grad():
-                    if config.is_encoder_decoder:
-                        raise NotImplementedError("Torchscript is currently not supported for EncoderDecoder models")
-                    else:
-                        inference_model = torch.jit.trace(model, input_ids)
-            else:
-                inference_model = model
+            input_ids = random_input_ids(batch_size, sequence_length, vocab_size)
 
             def encoder_decoder_forward():
-                with torch.no_grad():
-                    inference_model(input_ids, decoder_input_ids=input_ids)
+                model(input_ids, decoder_input_ids=input_ids)
 
             def encoder_forward():
-                with torch.no_grad():
-                    inference_model(input_ids)
+                model(input_ids)
 
             _forward = encoder_decoder_forward if config.is_encoder_decoder else encoder_forward
 
@@ -200,18 +170,10 @@ class TensorflowBenchmark(Benchmark):
                 if self.args.n_gpu > 0:
                     # gpu
                     # clear gpu cache
-                    torch.cuda.empty_cache()
-                    if hasattr(torch.cuda, "max_memory_reserved"):
-                        torch.cuda.reset_peak_memory_stats()
-                    else:
-                        logger.info(
-                            "Please consider updating PyTorch to version 1.4 to get more accuracy on GPU memory usage"
-                        )
-                        torch.cuda.reset_max_memory_cached()
-
-                        # run forward
-                        _forward()
-                elif not self.args.no_tpu and is_torch_tpu_available():
+                    tf_context.context()._clear_caches()  # See https://github.com/tensorflow/tensorflow/issues/20218#issuecomment-416771802
+                    # run forward
+                    _forward()
+                elif not self.args.no_tpu and self.args.is_tpu:
                     # tpu
                     raise NotImplementedError(
                         "Memory Benchmarking is currently not implemented for TPU. Please disable memory benchmarking with `args.no_memory=True`"
@@ -228,31 +190,23 @@ class TensorflowBenchmark(Benchmark):
 
                 if self.args.n_gpu > 0:
                     # gpu
-                    if hasattr(torch.cuda, "max_memory_reserved"):
-                        memory = Memory(torch.cuda.max_memory_reserved())
-                    else:
-                        logger.info(
-                            "Please consider updating PyTorch to version 1.4 to get more accuracy on GPU memory usage"
-                        )
-                        memory = Memory(torch.cuda.max_memory_cached())
+                    with tf.device(self.args.device):
+                        max_bytes_in_use = MaxBytesInUse()
+
+                    memory = Memory(max_bytes_in_use)
 
                 return memory, summary
             else:
 
-                if (not self.args.no_tpu and is_torch_tpu_available()) or self.args.torchscript:
+                if not self.args.no_tpu and not self.args.is_tpu:
                     # run additional 10 times to stabilize compilation for tpu and torchscript
-                    logger.info("Do inference on TPU or torchscript. Running model 5 times to stabilize compilation")
+                    logger.info("Do inference on TPU. Running model 5 times to stabilize compilation")
                     timeit.repeat(
                         _forward, repeat=1, number=5,
                     )
 
                 # as written in https://docs.python.org/2/library/timeit.html#timeit.Timer.repeat, min should be taken rather than the average
                 runtimes = timeit.repeat(_forward, repeat=self.args.repeat, number=10,)
-
-                if not self.args.no_tpu and is_torch_tpu_available() and self.args.torch_xla_tpu_print_metrics:
-                    import torch_xla.debug.metrics as met
-
-                    self.print_fn(met.metrics_report())
 
                 return min(runtimes) / 10.0
 

@@ -34,30 +34,23 @@ class TensorflowBenchmarkArguments(BenchmarkArguments):
     tpu_name: str = field(
         default=None, metadata={"help": "Name of TPU"},
     )
+    device_idx: int = field(
+        default=0, metadata={"help": "CPU / GPU device index. Defaults to 0."},
+    )
 
     @cached_property
     @tf_required
     def _setup_strategy(self) -> Tuple["tf.distribute.Strategy", int]:
         logger.info("Tensorflow: setting up strategy")
-        gpus = tf.config.list_physical_devices("GPU")
 
-        if self.no_cuda:
-            strategy = tf.distribute.OneDeviceStrategy(device="/cpu:0")
+        if not self.no_tpu and self.tpu:
+            tf.config.experimental_connect_to_cluster(self.tpu)
+            tf.tpu.experimental.initialize_tpu_system(self.tpu)
+
+            strategy = tf.distribute.experimental.TPUStrategy(self.tpu)
         else:
-            if self.tpu:
-                tf.config.experimental_connect_to_cluster(self.tpu)
-                tf.tpu.experimental.initialize_tpu_system(self.tpu)
-
-                strategy = tf.distribute.experimental.TPUStrategy(self.tpu)
-            elif len(gpus) == 0:
-                strategy = tf.distribute.OneDeviceStrategy(device="/cpu:0")
-            elif len(gpus) == 1:
-                strategy = tf.distribute.OneDeviceStrategy(device="/gpu:0")
-            elif len(gpus) > 1:
-                # If you only want to use a specific subset of GPUs use `CUDA_VISIBLE_DEVICES=0`
-                strategy = tf.distribute.MirroredStrategy()
-            else:
-                raise ValueError("Cannot find the proper strategy please check your environment properties.")
+            # currently no multi gpu is allowed
+            strategy = tf.distribute.OneDeviceStrategy(device=self.device)
 
         return strategy
 
@@ -90,6 +83,11 @@ class TensorflowBenchmarkArguments(BenchmarkArguments):
 
     @property
     @tf_required
-    def device_idx(self) -> int:
-        raise NotImplementedError("Implement this")
-#        return torch.cuda.current_device()
+    def device(self) -> str:
+        gpus = tf.config.list_physical_devices("GPU")
+        if self.is_tpu:
+            return self.tpu
+        if not self.no_cuda and len(gpus) > 0:
+            return "/gpu:{self.device_idx}"  # currently only single device is supported
+        else:
+            return "/cpu:{self.device_idx}"

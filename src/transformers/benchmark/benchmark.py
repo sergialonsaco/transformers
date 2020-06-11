@@ -104,8 +104,8 @@ class PyTorchBenchmark(Benchmark):
                         )
                         torch.cuda.reset_max_memory_cached()
 
-                        # calculate loss and do backpropagation
-                        _train()
+                    # calculate loss and do backpropagation
+                    _train()
                 elif not self.args.no_tpu and is_torch_tpu_available():
                     # tpu
                     raise NotImplementedError(
@@ -215,8 +215,8 @@ class PyTorchBenchmark(Benchmark):
                         )
                         torch.cuda.reset_max_memory_cached()
 
-                        # run forward
-                        _forward()
+                    # run forward
+                    _forward()
                 elif not self.args.no_tpu and is_torch_tpu_available():
                     # tpu
                     raise NotImplementedError(
