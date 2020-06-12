@@ -78,7 +78,8 @@ class TensorflowBenchmark(Benchmark):
 
     def train(self, model_name, batch_size, sequence_length, trace_memory=False):
         # clear gpu cache before going into scope
-        raise NotImplementedError("Currently not implemented")
+        raise NotImplementedError("Training is currently not really implemented."
+                                  "Wait for TFTrainer to support CLM and MLM.")
         if self.args.is_gpu:
             tf.keras.backend.clear_session()
 
