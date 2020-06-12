@@ -22,7 +22,7 @@ from typing import Callable, Iterable, List, NamedTuple, Optional, Union
 from transformers import AutoConfig, PretrainedConfig
 from transformers import __version__ as version
 
-from ..file_utils import is_tf_available, is_torch_available
+from ..file_utils import is_psutil_available, is_py3nvml_available, is_tf_available, is_torch_available
 from .benchmark_args_utils import BenchmarkArguments
 
 
@@ -32,6 +32,11 @@ if is_torch_available():
 if is_tf_available():
     from tensorflow.python.eager import context as tf_context
 
+if is_psutil_available():
+    import psutil
+
+if is_py3nvml_available():
+    import py3nvml.py3nvml as nvml
 
 logger = logging.getLogger(__name__)  # pylint: disable=invalid-name
 
@@ -131,7 +136,10 @@ class MemorySummary(NamedTuple):
 MemoryTrace = List[UsedMemoryState]
 
 
-def measure_peak_memory_cpu(function: Callable[[], None], interval=0.5) -> int:
+def measure_peak_memory_cpu(
+    function: Callable[[], None], processessing_unit_type: str, interval=0.5, device_idx=None
+) -> int:
+
     """
         measures peak cpu memory consumption of a given `function`
         running the function for at least interval seconds
@@ -143,42 +151,78 @@ def measure_peak_memory_cpu(function: Callable[[], None], interval=0.5) -> int:
             - `function`: (`callable`): function() -> ...
                 function without any arguments to measure for which to measure the peak memory
 
-            - `interval`: (`float`)
+            - `processessing_unit_type: (`str`):
+                type of Processing Unit to measure. Either "cpu" or "gpu"
+
+            - `interval`: (`float`, `optional`, defaults to `0.5`)
                 interval in second for which to measure the memory usage
+
+            - `device_idx`: (`int`, `optional`, defaults to `None`)
+                device id for which to measure gpu usage
 
         Returns:
             - `max_memory`: (`int`)
                 cosumed memory peak in Bytes
     """
-    try:
-        import psutil
-    except (ImportError):
+
+    def get_gpu_memory(process_id: int, device_idx: int) -> int:
+        """
+            measures current gpu memory usage of a given `process_id`
+
+            Args:
+                - `process_id`: (`int`)
+                    process_id for which to measure memory
+
+                - `device_idx`: (`int`)
+                    device id for which to measure gpu usage
+
+            Returns
+                - `memory`: (`int`)
+                    cosumed memory in Bytes
+        """
+        try:
+            nvml.nvmlInit()
+            handle = nvml.nvmlDeviceGetHandleByIndex(device_idx)
+            processes = nvml.nvmlDeviceGetComputeRunningProcesses(handle)
+            current_process = next(filter(lambda x: x.pid == process_id, processes))
+            memory = current_process.usedGpuMemory
+            nvml.nvmlShutdown()
+        except nvml.NVMLError_GpuIsLost:
+            raise ValueError("Error with p3nvml.")
+        except (RuntimeError):
+            import ipdb
+
+            ipdb.set_trace()
+            raise RuntimeError
+        return memory
+
+    def get_cpu_memory(process_id: int) -> int:
+        """
+            measures current cpu memory usage of a given `process_id`
+
+            Args:
+                - `process_id`: (`int`)
+                    process_id for which to measure memory
+
+            Returns
+                - `memory`: (`int`)
+                    cosumed memory in Bytes
+        """
+        process = psutil.Process(process_id)
+        try:
+            meminfo_attr = "memory_info" if hasattr(process, "memory_info") else "get_memory_info"
+            memory = getattr(process, meminfo_attr)()[0]
+        except psutil.AccessDenied:
+            raise ValueError("Error with Psutil.")
+        return memory
+
+    if not is_psutil_available():
         logger.warning(
             "Psutil not installed, we won't log CPU memory usage. "
             "Install Psutil (pip install psutil) to use CPU memory tracing."
         )
         max_memory = "N/A"
     else:
-
-        def _get_memory(process_id: int) -> int:
-            """
-                measures current cpu memory usage of a given `process_id`
-
-                Args:
-                    - `process_id`: (`int`)
-                        process_id for which to measure memory
-
-                Returns
-                    - `memory`: (`int`)
-                        cosumed memory in Bytes
-            """
-            process = psutil.Process(process_id)
-            try:
-                meminfo_attr = "memory_info" if hasattr(process, "memory_info") else "get_memory_info"
-                memory = getattr(process, meminfo_attr)()[0]
-            except psutil.AccessDenied:
-                raise ValueError("Error with Psutil.")
-            return memory
 
         class MemoryMeasureProcess(Process):
 
@@ -193,13 +237,25 @@ def measure_peak_memory_cpu(function: Callable[[], None], interval=0.5) -> int:
                 self.interval = interval
                 self.connection = child_connection
                 self.num_measurements = 1
-                self.mem_usage = _get_memory(process_id)
+                if processessing_unit_type == "cpu":
+                    self.mem_usage = get_cpu_memory(self.process_id)
+                elif processessing_unit_type == "gpu":
+                    self.mem_usage = get_gpu_memory(self.process_id, device_idx)
+                else:
+                    raise NotImplementedError(f"{processessing_unit_type} does not exist.")
 
             def run(self):
                 self.connection.send(0)
                 stop = False
                 while True:
-                    self.mem_usage = max(self.mem_usage, _get_memory(self.process_id))
+                    if processessing_unit_type == "cpu":
+                        mem_usage = get_cpu_memory(self.process_id)
+                    elif processessing_unit_type == "gpu":
+                        mem_usage = get_gpu_memory(self.process_id, device_idx)
+                    else:
+                        raise NotImplementedError(f"{processessing_unit_type} does not exist.")
+
+                    self.mem_usage = max(self.mem_usage, mem_usage)
                     self.num_measurements += 1
 
                     if stop:
@@ -291,34 +347,26 @@ def start_memory_tracing(
             - 'line_text' (string): Text of the line in the python script
 
     """
-    try:
-        import psutil
-    except (ImportError):
+    if is_psutil_available():
+        process = psutil.Process(os.getpid())
+    else:
         logger.warning(
             "Psutil not installed, we won't log CPU memory usage. "
             "Install psutil (pip install psutil) to use CPU memory tracing."
         )
         process = None
+
+    if is_py3nvml_available():
+        nvml.nvmlInit()
+        devices = list(range(nvml.nvmlDeviceGetCount())) if gpus_to_trace is None else gpus_to_trace
+        nvml.nvmlShutdown()
+        log_gpu = is_torch_available() or is_tf_available()
     else:
-        process = psutil.Process(os.getpid())
-
-    try:
-        from py3nvml import py3nvml
-
-        py3nvml.nvmlInit()
-        devices = list(range(py3nvml.nvmlDeviceGetCount())) if gpus_to_trace is None else gpus_to_trace
-        py3nvml.nvmlShutdown()
-    except ImportError:
         logger.warning(
             "py3nvml not installed, we won't log GPU memory usage. "
             "Install py3nvml (pip install py3nvml) to use GPU memory tracing."
         )
         log_gpu = False
-    except (OSError, py3nvml.NVMLError):
-        logger.warning("Error while initializing comunication with GPU. " "We won't perform GPU memory tracing.")
-        log_gpu = False
-    else:
-        log_gpu = is_torch_available() or is_tf_available()
 
     memory_trace = []
 
@@ -380,14 +428,14 @@ def start_memory_tracing(
                 tf_context.context()._clear_caches()  # See https://github.com/tensorflow/tensorflow/issues/20218#issuecomment-416771802
 
             # Sum used memory for all GPUs
-            py3nvml.nvmlInit()
+            nvml.nvmlInit()
 
             for i in devices:
-                handle = py3nvml.nvmlDeviceGetHandleByIndex(i)
-                meminfo = py3nvml.nvmlDeviceGetMemoryInfo(handle)
+                handle = nvml.nvmlDeviceGetHandleByIndex(i)
+                meminfo = nvml.nvmlDeviceGetMemoryInfo(handle)
                 gpu_mem += meminfo.used
 
-            py3nvml.nvmlShutdown()
+            nvml.nvmlShutdown()
 
         mem_state = UsedMemoryState(traced_state, cpu_mem, gpu_mem)
         memory_trace.append(mem_state)
@@ -545,10 +593,6 @@ class Benchmark(ABC):
         return self._print_fn
 
     @property
-    def is_gpu(self):
-        return self.args.n_gpu > 0
-
-    @property
     @abstractmethod
     def framework_version(self):
         pass
@@ -680,26 +724,28 @@ class Benchmark(ABC):
             info["date"] = datetime.date(datetime.now())
             info["time"] = datetime.time(datetime.now())
 
-            try:
-                import psutil
-            except (ImportError):
+            if is_psutil_available():
+                info["cpu_ram_mb"] = bytes_to_mega_bytes(psutil.virtual_memory().total)
+            else:
                 logger.warning(
                     "Psutil not installed, we won't log available CPU memory."
                     "Install psutil (pip install psutil) to log available CPU memory."
                 )
                 info["cpu_ram_mb"] = "N/A"
-            else:
-                info["cpu_ram_mb"] = bytes_to_mega_bytes(psutil.virtual_memory().total)
 
-            info["use_gpu"] = self.is_gpu
-            if self.is_gpu:
+            info["use_gpu"] = self.args.is_gpu
+            if self.args.is_gpu:
                 info["num_gpus"] = self.args.n_gpu
-                try:
-                    from py3nvml import py3nvml
 
-                    py3nvml.nvmlInit()
-                    handle = py3nvml.nvmlDeviceGetHandleByIndex(self.args.device_idx)
-                except ImportError:
+                if is_py3nvml_available():
+                    nvml.nvmlInit()
+                    handle = nvml.nvmlDeviceGetHandleByIndex(self.args.device_idx)
+                    info["gpu"] = nvml.nvmlDeviceGetName(handle)
+                    info["gpu_ram_mb"] = bytes_to_mega_bytes(nvml.nvmlDeviceGetMemoryInfo(handle).total)
+                    info["gpu_power_watts"] = nvml.nvmlDeviceGetPowerManagementLimit(handle) / 1000
+                    info["gpu_performance_state"] = nvml.nvmlDeviceGetPerformanceState(handle)
+                    nvml.nvmlShutdown()
+                else:
                     logger.warning(
                         "py3nvml not installed, we won't log GPU memory usage. "
                         "Install py3nvml (pip install py3nvml) to log information about GPU."
@@ -708,21 +754,6 @@ class Benchmark(ABC):
                     info["gpu_ram_mb"] = "N/A"
                     info["gpu_power_watts"] = "N/A"
                     info["gpu_performance_state"] = "N/A"
-                except (OSError, py3nvml.NVMLError):
-                    logger.warning(
-                        "Error while initializing comunication with GPU. " "We won't log information about GPU."
-                    )
-                    info["gpu"] = "N/A"
-                    info["gpu_ram_mb"] = "N/A"
-                    info["gpu_power_watts"] = "N/A"
-                    info["gpu_performance_state"] = "N/A"
-                    py3nvml.nvmlShutdown()
-                else:
-                    info["gpu"] = py3nvml.nvmlDeviceGetName(handle)
-                    info["gpu_ram_mb"] = bytes_to_mega_bytes(py3nvml.nvmlDeviceGetMemoryInfo(handle).total)
-                    info["gpu_power_watts"] = py3nvml.nvmlDeviceGetPowerManagementLimit(handle) / 1000
-                    info["gpu_performance_state"] = py3nvml.nvmlDeviceGetPerformanceState(handle)
-                    py3nvml.nvmlShutdown()
 
             info["use_tpu"] = self.args.is_tpu
             # TODO(PVP): See if we can add more information about TPU
