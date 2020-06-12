@@ -22,7 +22,7 @@ from typing import Callable, Iterable, List, NamedTuple, Optional, Union
 from transformers import AutoConfig, PretrainedConfig
 from transformers import __version__ as version
 
-from ..file_utils import is_tf_available, is_torch_available, is_torch_tpu_available
+from ..file_utils import is_tf_available, is_torch_available
 from .benchmark_args_utils import BenchmarkArguments
 
 
@@ -607,44 +607,44 @@ class Benchmark(ABC):
 
         if not self.args.no_inference:
             if not self.args.no_speed:
-                self.print_fn("======= INFERENCE - SPEED - RESULT =======")
-                self.print_results(inference_result_time)
+                self.print_fn("\n" + 20 * "=" + ("INFERENCE - SPEED - RESULT").center(40) + 20 * "=")
+                self.print_results(inference_result_time, type_label="Time in s")
                 self.save_to_csv(inference_result_time, self.args.inference_time_csv_file)
-                if self.is_tpu:
+                if self.args.is_tpu:
                     self.print_fn(
                         "TPU was used for inference. Note that the time after compilation stabilized (after ~10 inferences model.forward(..) calls) was measured."
                     )
 
             if not self.args.no_memory:
-                self.print_fn("======= INFERENCE - MEMORY - RESULT =======")
-                self.print_results(inference_result_memory)
+                self.print_fn("\n" + 20 * "=" + ("INFERENCE - MEMORY - RESULT").center(40) + 20 * "=")
+                self.print_results(inference_result_memory, type_label="Memory in MB")
                 self.save_to_csv(inference_result_memory, self.args.inference_memory_csv_file)
 
             if self.args.trace_memory_line_by_line:
-                self.print_fn("======= INFERENCE - MEMORY LINE BY LINE TRACE - SUMMARY =======")
+                self.print_fn("\n" + 20 * "=" + ("INFERENCE - MEMOMRY - LINE BY LINE - SUMMARY").center(40) + 20 * "=")
                 self.print_memory_trace_statistics(inference_summary)
 
         if self.args.training:
             if not self.args.no_speed:
-                self.print_fn("======= TRAIN - SPEED - RESULT =======")
-                self.print_results(train_result_time)
+                self.print_fn("\n" + 20 * "=" + ("TRAIN - SPEED - RESULTS").center(40) + 20 * "=")
+                self.print_results(train_result_time, "Time in s")
                 self.save_to_csv(train_result_time, self.args.train_time_csv_file)
-                if self.is_tpu:
+                if self.args.is_tpu:
                     self.print_fn(
                         "TPU was used for training. Note that the time after compilation stabilized (after ~10 train loss=model.forward(...) + loss.backward() calls) was measured."
                     )
 
             if not self.args.no_memory:
-                self.print_fn("======= TRAIN - MEMORY - RESULT =======")
-                self.print_results(train_result_memory)
+                self.print_fn("\n" + 20 * "=" + ("TRAIN - MEMORY - RESULTS").center(40) + 20 * "=")
+                self.print_results(train_result_memory, type_label="Memory in MB")
                 self.save_to_csv(train_result_memory, self.args.train_memory_csv_file)
 
             if self.args.trace_memory_line_by_line:
-                self.print_fn("======= TRAIN - MEMORY LINE BY LINE TRACE - SUMMARY =======")
+                self.print_fn("\n" + 20 * "=" + ("TRAIN - MEMOMRY - LINE BY LINE - SUMMARY").center(40) + 20 * "=")
                 self.print_memory_trace_statistics(train_summary)
 
         if not self.args.no_env_print:
-            self.print_fn("\n======== ENVIRONMENT - INFORMATION ========")
+            self.print_fn("\n" + 20 * "=" + ("ENVIRONMENT INFORMATION").center(40) + 20 * "=")
             self.print_fn(
                 "\n".join(["- {}: {}".format(prop, val) for prop, val in self.environment_info.items()]) + "\n"
             )
@@ -724,25 +724,27 @@ class Benchmark(ABC):
                     info["gpu_performance_state"] = py3nvml.nvmlDeviceGetPerformanceState(handle)
                     py3nvml.nvmlShutdown()
 
-            info["use_tpu"] = self.is_tpu
+            info["use_tpu"] = self.args.is_tpu
             # TODO(PVP): See if we can add more information about TPU
             # see: https://github.com/pytorch/xla/issues/2180
 
             self._environment_info = info
         return self._environment_info
 
-    def print_results(self, result_dict):
+    def print_results(self, result_dict, type_label):
+        self.print_fn(80 * "-")
+        self.print_fn("Model Name".center(30) + "Batch Size".center(15) + "Seq Length".center(15) + type_label.center(15))
+        self.print_fn(80 * "-")
         for model_name in self.args.model_names:
-            self.print_fn("\t" + f"======= MODEL CHECKPOINT: {model_name} =======")
             for batch_size in result_dict[model_name]["bs"]:
                 for sequence_length in result_dict[model_name]["ss"]:
                     result = result_dict[model_name]["result"][batch_size][sequence_length]
                     if isinstance(result, float):
-                        self.print_fn(
-                            f"\t\t{model_name}/{batch_size}/{sequence_length}: " f"{(round(1000 * result) / 1000)}s"
-                        )
+                        result = str((round(1000 * result) / 1000))
                     else:
-                        self.print_fn(f"\t\t{model_name}/{batch_size}/{sequence_length}: " f"{result} MB")
+                        result = str(result)
+                    self.print_fn(model_name.center(30) + str(batch_size).center(15), str(sequence_length).center(15), result.center(15))
+        self.print_fn(80 * "-")
 
     def print_memory_trace_statistics(self, summary: MemorySummary):
         self.print_fn(
